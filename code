@@ -1,0 +1,161 @@
+    public function linkchecker($id=null){
+        $urls = [];
+        switch($id){
+            case 1:
+                //id=1 find href in Database::Document
+                array_push($urls,...$this->getHrefDoc());
+            break;
+            case 2:
+                //id=2 find href in files
+                array_push($urls,...$this->getHrefFiles());
+            break;
+            default:
+                array_push($urls,...$this->getHrefDoc());
+                array_push($urls,...$this->getHrefFiles());
+            break;
+
+        }
+        // dd($urls);
+        $result = $this->checkUrls($urls);
+        dd($result);
+        $colums = ['Href','Id or File','Code','Message'];
+        $this->send_attachment_file($result,$colums);
+        // return Excel::download(new DynamicExport($result,$colums), 'Bad_links.xlsx');
+    }  
+    
+    function send_attachment_file ($result,$colums){
+        $excelFile = Excel::raw(new DynamicExport($result,$colums), BaseExcel::XLSX);
+        $data["email"] = 'mobiletic@gmail.com';
+        $data["subject"] = 'Excel Attachment';
+        $data["body_message"] = "Please find attachment file of user summery";
+        $data["file_name"] = 'Bad_links.xlsx';
+        Mail::send([], $data, function($message)use($data, $excelFile) {
+            $message->to($data["email"])
+                ->subject($data["subject"])
+                ->from('noreply@mobiletic.com', 'Mobiletic Support')
+                ->attachData($excelFile,  $data["file_name"]);
+        });
+        
+        return response()->json(['status' => 'success', 'message' => 'successful..!']);
+    }
+
+    protected function getHrefDoc(){
+        $urls = [];
+        $hrefDocuments = Document::all()->pluck('href','id');
+        foreach($hrefDocuments as $id => $href){
+            if((str_contains($href, 'http'))){
+                array_push($urls,['href'=>$href,'document_id'=>$id]);
+            }
+        }
+        return $urls;
+    } 
+    protected function getHrefFiles(){
+        $urls = [];
+        $paths = $this->grainsPaths();
+        foreach($paths as $path){
+            foreach (glob($path."/*.html") as $file) {
+                $html = file_get_contents($file);
+                $dom = new DOMDocument();
+                $dom->recover = true;
+                $dom->strictErrorChecking = false;
+                @$dom->loadHTML($html);
+                $xpath = new DOMXPath($dom);
+                $nodes = $xpath->query('//a/@href');
+                foreach($nodes as $href) {
+                    if((str_contains($href->value, 'http'))){
+                        if((substr($href->value,0,4)=='http')){
+                        array_push($urls,['href'=>$href->value,'file'=>$file]);
+                        }
+                        else{
+                            $start = strpos($href->value,'http');
+                            $hrefClean = substr($href->value,$start,-2);
+                            array_push($urls,['href'=>$hrefClean,'file'=>$file]);
+                        }
+                    }
+                }
+            } 
+        }
+        return $urls;
+    }
+    protected function grainsPaths(){
+        $resources = Resource::whereIn('res_type',['grains','link'])->get();
+        $paths = [];
+        foreach ($resources as $k => $v) {
+            $result[] = $v->title;
+            $p = str_replace('grains://', '', $v->uri);
+            $grain = theme_path('storage', config('themes.active')) . '/' . config("catalogue.grainPath") . '/' . $p;
+            array_push($paths, $grain);
+            $content = $grain.'/content';
+            if(file_exists($content)){
+                $folders = glob($content . '/*');
+                $folders = array_filter($folders, function($dir) {
+                    return is_dir($dir);
+                });
+                $paths = array_merge($paths, $folders);            
+            }
+        }
+        return $paths;
+    }
+
+    protected function checkUrls($urls) {
+        $badurls = [];
+        foreach($urls as $url){  
+            if(strpos($url['href'],'youtu') !== false){
+                $video_id='';
+                if(strpos($url['href'],'youtu.be') !== false){
+                    $video_id = substr($url['href'], strpos($url['href'],'youtu.be')+9,strlen($url['href']));
+                }elseif(strpos($url['href'],'youtube.com') !== false){
+                    $video_id = substr($url['href'], strpos($url['href'],'watch?v=')+8,strlen($url['href'])); 
+                }
+                $api_key = "AIzaSyAHutdMsuaMvpgA7VS-hVOiKKnZqfcGnUM";
+                $YB_url = "https://www.googleapis.com/youtube/v3/videos?id=$video_id&key=$api_key&part=status";
+                $json = file_get_contents($YB_url);
+                $getData = json_decode( $json , true);
+                if(count($getData['items'])<1){
+                    $status = $this->statusCode(204);
+                    array_push($badurls,array_merge($url,['Code'=>204,'Status'=>$status]));
+                }else{
+                    continue;
+                }
+            }else{
+                try{
+                    if(strpos($url['href'],'relink') !== false){ 
+                        $currentURL = config('app.url'); 
+                        $url['href'] = str_replace("http://relink.mobiletic.com/",$currentURL,$url['href']);
+                        // dd($url['href']);
+                    }
+                    $client = new Client();
+                    $response = $client->get($url['href'], ['allow_redirects' => false,'timeout' => 4]);
+                    $code = $response->getStatusCode();
+                    if($code >= 300 || $code == 204){
+                        $status = $this->statusCode($code);
+                        array_push($badurls,array_merge($url,['Code'=>$code,'Status'=>$status]));
+                    }
+                }catch(Exception $e){
+                    $status = $this->statusCode($e->getCode());        
+                    array_push($badurls,array_merge($url,['Code'=>$e->getCode(),'Status'=>$status]));
+                }
+            }
+        }
+        // dd('Bad Links in '.$target,$badurls);
+        // return view('theme::modules.',$badurls);
+        return $badurls;
+    }
+
+    protected function statusCode($code){
+        $client = new Client();
+        $url = "https://raw.githubusercontent.com/for-GET/know-your-http-well/master/json/status-codes.json";
+        $response = $client->get($url);
+        $statusCode = json_decode($response->getBody());
+        foreach($statusCode as $value) {
+            if($value->code==$code){
+                return $value->phrase;
+            } 
+        }
+        if($code==0) return 'Link invalid';
+        return false;
+    }
+
+    /*******                             *******/
+    /**********   href Checker End   ***********/
+    /*******************************************/
